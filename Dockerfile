@@ -1,5 +1,7 @@
-# Dockerfile — NYX PHP Relay Server (Brute-Force MPM Fix)
-FROM php:8.1-apache
+# Dockerfile — NYX PHP Relay Server (Lightweight CLI Mode)
+# No Apache = No MPM conflicts. Perfect for blind relay.
+
+FROM php:8.1-cli
 
 # 1. Install system dependencies for PostgreSQL AND SQLite
 RUN apt-get update && apt-get install -y \
@@ -11,35 +13,13 @@ RUN apt-get update && apt-get install -y \
 # 2. Install PHP extensions (PDO, PostgreSQL, SQLite)
 RUN docker-php-ext-install pdo pdo_pgsql pdo_sqlite
 
-# 3. BRUTE FORCE MPM FIX (راه زور!)
-# Physically delete the conflicting MPM configuration files
-RUN rm -f /etc/apache2/mods-enabled/mpm_event.conf \
-          /etc/apache2/mods-enabled/mpm_event.load \
-          /etc/apache2/mods-enabled/mpm_worker.conf \
-          /etc/apache2/mods-enabled/mpm_worker.load
+# 3. Set working directory and copy server files
+WORKDIR /app
+COPY server/ /app/
 
-# Explicitly enable prefork and rewrite
-RUN a2enmod mpm_prefork rewrite
+# 4. Expose port 8000 (Standard for PHP CLI server, Railway maps this automatically)
+EXPOSE 8000
 
-# 4. Set the document root to the server directory
-ENV APACHE_DOCUMENT_ROOT=/var/www/html/server
-
-# 5. Update Apache configuration to use the new document root
-RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf
-RUN sed -ri -e 's!/var/www/!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf /etc/apache2/conf-available/*.conf
-
-# 6. Copy server files from the server/ directory
-COPY server/ /var/www/html/server/
-
-# 7. Set correct permissions for Apache
-RUN chown -R www-data:www-data /var/www/html
-
-# 8. Environment variables for dual-database support
-ENV DRIVER=sqlite
-ENV DATABASE_URL=""
-
-# 9. Expose port 80
-EXPOSE 80
-
-# 10. Start Apache
-CMD ["apache2-foreground"]
+# 5. Start the PHP built-in server, pointing document root to /app
+# The -t flag ensures that requests like /register.php are routed correctly
+CMD ["php", "-S", "0.0.0.0:8000", "-t", "/app"]
