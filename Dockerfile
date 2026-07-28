@@ -1,4 +1,4 @@
-FROM php:8.2-apache
+kFROM php:8.2-apache
 
 # 1. Install system dependencies for PostgreSQL AND SQLite
 RUN apt-get update && apt-get install -y \
@@ -10,8 +10,10 @@ RUN apt-get update && apt-get install -y \
 # 2. Install PHP extensions (PDO, PostgreSQL, SQLite)
 RUN docker-php-ext-install pdo pdo_pgsql pdo_sqlite
 
-# 3. Fix Apache MPM conflict (disable event/worker, enable prefork)
-RUN a2dismod mpm_event mpm_worker && a2enmod mpm_prefork
+# 3. Foolproof Apache MPM Fix (Force disable others, enable prefork)
+RUN a2dismod mpm_event || true
+RUN a2dismod mpm_worker || true
+RUN a2enmod mpm_prefork
 
 # 4. Set working directory and copy files
 WORKDIR /var/www/html
@@ -20,7 +22,7 @@ COPY . /var/www/html/
 # 5. Set correct permissions for Apache
 RUN chown -R www-data:www-data /var/www/html
 
-# 6. Expose port 80 (Railway automatically routes traffic to this)
+# 6. Expose port 80
 EXPOSE 80
 
 CMD ["apache2-foreground"]
