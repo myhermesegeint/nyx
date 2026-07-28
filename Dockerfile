@@ -1,8 +1,9 @@
 FROM php:8.2-apache
 
-# 1. Install system dependencies for PostgreSQL (libpq-dev)
+# 1. Install system dependencies for PostgreSQL AND SQLite
 RUN apt-get update && apt-get install -y \
     libpq-dev \
+    libsqlite3-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
