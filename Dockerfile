@@ -1,4 +1,4 @@
-kFROM php:8.2-apache
+FROM php:8.2-apache
 
 # 1. Install system dependencies for PostgreSQL AND SQLite
 RUN apt-get update && apt-get install -y \
