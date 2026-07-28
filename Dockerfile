@@ -10,14 +10,17 @@ RUN apt-get update && apt-get install -y \
 # 2. Install PHP extensions (PDO, PostgreSQL, SQLite)
 RUN docker-php-ext-install pdo pdo_pgsql pdo_sqlite
 
-# 3. Set working directory and copy files
+# 3. Fix Apache MPM conflict (disable event/worker, enable prefork)
+RUN a2dismod mpm_event mpm_worker && a2enmod mpm_prefork
+
+# 4. Set working directory and copy files
 WORKDIR /var/www/html
 COPY . /var/www/html/
 
-# 4. Set correct permissions for Apache
+# 5. Set correct permissions for Apache
 RUN chown -R www-data:www-data /var/www/html
 
-# 5. Expose port 80 (Railway automatically routes traffic to this)
+# 6. Expose port 80 (Railway automatically routes traffic to this)
 EXPOSE 80
 
 CMD ["apache2-foreground"]
