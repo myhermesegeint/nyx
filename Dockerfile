@@ -1,4 +1,4 @@
-# Dockerfile — NYX PHP Relay Server (Railway-Ready)
+# Dockerfile — NYX PHP Relay Server (Brute-Force MPM Fix)
 FROM php:8.1-apache
 
 # 1. Install system dependencies for PostgreSQL AND SQLite
@@ -11,11 +11,15 @@ RUN apt-get update && apt-get install -y \
 # 2. Install PHP extensions (PDO, PostgreSQL, SQLite)
 RUN docker-php-ext-install pdo pdo_pgsql pdo_sqlite
 
-# 3. Fix Apache MPM conflict (CRITICAL for php:8.1-apache on Debian Bookworm)
-RUN a2dismod mpm_event || true
-RUN a2dismod mpm_worker || true
-RUN a2enmod mpm_prefork
-RUN a2enmod rewrite
+# 3. BRUTE FORCE MPM FIX (راه زور!)
+# Physically delete the conflicting MPM configuration files
+RUN rm -f /etc/apache2/mods-enabled/mpm_event.conf \
+          /etc/apache2/mods-enabled/mpm_event.load \
+          /etc/apache2/mods-enabled/mpm_worker.conf \
+          /etc/apache2/mods-enabled/mpm_worker.load
+
+# Explicitly enable prefork and rewrite
+RUN a2enmod mpm_prefork rewrite
 
 # 4. Set the document root to the server directory
 ENV APACHE_DOCUMENT_ROOT=/var/www/html/server
@@ -34,7 +38,7 @@ RUN chown -R www-data:www-data /var/www/html
 ENV DRIVER=sqlite
 ENV DATABASE_URL=""
 
-# 9. Expose port 80 (Railway automatically routes traffic to this)
+# 9. Expose port 80
 EXPOSE 80
 
 # 10. Start Apache
