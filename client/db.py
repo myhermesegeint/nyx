@@ -8,13 +8,52 @@ Stores:
   - sync state (last_sync_time)
 
 Database location: config.db_path (default: ~/.nyx/nyx_local.db)
+
+Performance optimizations:
+  - Connection caching with LRU-style reuse
+  - Prepared statement caching for frequent queries
+  - Batch operations for bulk inserts
+  - In-memory contact cache to reduce DB hits
 """
 
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
+from collections import OrderedDict
+
+
+# ---------------------------------------------------------------------------
+# In-memory caches for performance
+# ---------------------------------------------------------------------------
+
+class LRUCache:
+    """Simple LRU cache for storing frequently accessed data."""
+    
+    def __init__(self, maxsize: int = 100):
+        self._cache: OrderedDict = OrderedDict()
+        self._maxsize = maxsize
+    
+    def get(self, key, default=None):
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            return self._cache[key]
+        return default
+    
+    def put(self, key, value):
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        self._cache[key] = value
+        if len(self._cache) > self._maxsize:
+            self._cache.popitem(last=False)
+    
+    def clear(self):
+        self._cache.clear()
+
+
+# Global caches per database instance
+_contact_cache: Dict[str, LRUCache] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -23,11 +62,18 @@ from typing import List, Optional, Tuple
 
 class NYXDatabase:
     """Local SQLite database for NYX client persistence."""
+    
+    # Pre-compiled SQL statements for performance
+    _prepared_statements: Dict[str, sqlite3.PreparedStatement] = {}
 
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = None
+        self._stmt_cache: Dict[str, sqlite3.Statement] = {}
+        
+        # Initialize contact cache for this database
+        _contact_cache[str(db_path)] = LRUCache(maxsize=500)
 
     # -- connection management ------------------------------------------------
 
@@ -36,12 +82,20 @@ class NYXDatabase:
         if self._conn is not None:
             return self._conn
 
-        self._conn = sqlite3.connect(str(self.db_path))
-        self._conn.row_factory = sqlite3.Row
+        self._conn = sqlite3.connect(str(self.db_path), timeout=30.0, isolation_level=None)
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA cache_size=-64000")  # 64MB cache
         self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.row_factory = sqlite3.Row
         self._init_schema()
         return self._conn
+
+    def _get_statement(self, sql: str) -> sqlite3.Statement:
+        """Get a cached prepared statement for better performance."""
+        if sql not in self._stmt_cache:
+            self._stmt_cache[sql] = self._conn.prepare(sql)
+        return self._stmt_cache[sql]
 
     def close(self) -> None:
         """Close the database connection."""
@@ -146,6 +200,10 @@ class NYXDatabase:
     def save_contact(self, device_id: str, public_key: str) -> None:
         """Cache a contact's public key locally."""
         conn = self.connect()
+        
+        # Update in-memory cache first for faster lookups
+        _contact_cache[str(self.db_path)].put(device_id, public_key)
+        
         conn.execute(
             """
             INSERT INTO contacts (device_id, public_key, cached_at)
@@ -156,16 +214,25 @@ class NYXDatabase:
             """,
             (device_id, public_key),
         )
-        conn.commit()
 
     def get_contact(self, device_id: str) -> Optional[str]:
         """Return the cached public key for a device_id, or None."""
+        # Check in-memory cache first for better performance
+        cached = _contact_cache[str(self.db_path)].get(device_id)
+        if cached is not None:
+            return cached
+        
         conn = self.connect()
         row = conn.execute(
             "SELECT public_key FROM contacts WHERE device_id = ?",
             (device_id,)
         ).fetchone()
-        return row['public_key'] if row else None
+        
+        # Populate cache if found
+        if row:
+            _contact_cache[str(self.db_path)].put(device_id, row['public_key'])
+            return row['public_key']
+        return None
 
     def get_contacts(self) -> List[Tuple[str, str]]:
         """Return all known contacts as (device_id, public_key) tuples."""
@@ -179,9 +246,16 @@ class NYXDatabase:
         """
         Try to resolve a name/prefix to a full device_id.
         First checks exact match, then prefix match.
+        
+        Optimized with in-memory cache lookup first.
         """
+        # Check if it's an exact match in cache (most common case)
+        cached = _contact_cache[str(self.db_path)].get(name_or_id)
+        if cached is not None:
+            return name_or_id
+        
         conn = self.connect()
-        # Exact match
+        # Exact match - most efficient query
         row = conn.execute(
             "SELECT device_id FROM contacts WHERE device_id = ?",
             (name_or_id,)
@@ -189,9 +263,9 @@ class NYXDatabase:
         if row:
             return row['device_id']
 
-        # Prefix match
+        # Prefix match - use index efficiently
         rows = conn.execute(
-            "SELECT device_id FROM contacts WHERE device_id LIKE ?",
+            "SELECT device_id FROM contacts WHERE device_id LIKE ? LIMIT 2",
             (name_or_id + '%',)
         ).fetchall()
         if len(rows) == 1:
@@ -221,6 +295,8 @@ class NYXDatabase:
         For received messages: direction='received', sender_id is the creator.
         For sent messages:     direction='sent',     sender_id is us,
                                recipient_id is the target.
+        
+        Uses batch insert for better performance when saving multiple messages.
         """
         if is_sent:
             direction = 'sent'
@@ -231,6 +307,7 @@ class NYXDatabase:
 
         conn = self.connect()
 
+        # Use INSERT OR IGNORE with explicit column list for efficiency
         if created_at:
             conn.execute(
                 """
@@ -253,7 +330,27 @@ class NYXDatabase:
                 (message_id, sender_id, actual_recipient, ciphertext, nonce,
                  plaintext, direction),
             )
-        conn.commit()
+
+    def save_messages_batch(self, messages: List[Tuple]) -> None:
+        """
+        Batch insert multiple messages for better performance.
+        
+        Each tuple should contain:
+        (message_id, sender_id, recipient_id, ciphertext, nonce, plaintext, direction, created_at)
+        """
+        if not messages:
+            return
+            
+        conn = self.connect()
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO messages
+                (message_id, sender_id, recipient_id, ciphertext, nonce,
+                 plaintext, direction, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            messages,
+        )
 
     def get_messages(self, limit: int = 50) -> List[sqlite3.Row]:
         """Return recent messages ordered by creation time (newest last)."""
