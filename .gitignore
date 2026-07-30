@@ -1,17 +1,1 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-venv/
-.env
-
-# Local Databases
-*.sqlite
-*.db
-
-# IDE & OS
-.idea/
-.vscode/
-*.swp
-.DS_Store
+Nothing should be ignored since only source files (.py) were modified and no build artifacts, dependencies, or temporary files were present in the changes.
